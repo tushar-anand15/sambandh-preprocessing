@@ -16,3 +16,4 @@ dist/
 *.egg-info/
 etc/sample_*/
 etc/*output/
+.secrets/

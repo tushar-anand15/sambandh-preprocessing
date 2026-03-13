@@ -5,28 +5,23 @@ description = "RAG retrieval pipeline for Sulekha municipal project documents"
 readme = "docs/SPEC.md"
 requires-python = ">=3.11"
 dependencies = [
-    # PDF Parsing
-    "marker-pdf>=1.10.2",
-    # Embeddings
-    "FlagEmbedding>=1.2",
-    "tiktoken>=0.7",
+    # PDF Parsing with Docling (CPU-only)
+    "docling>=2.79.0",
     # Database
-    "psycopg[binary]>=3.0",
-    "sqlalchemy>=2.0",
+    "psycopg[binary,pool]>=3.1",
     # Cloud Storage
     "google-cloud-storage>=2.14",
     # Config & CLI
     "python-dotenv>=1.0",
     "rich>=13.0",
-    "click>=8.1",
-    "pdfplumber>=0.11.9",
-    "pymupdf>=1.27.2",
-    "pdftext>=0.6.3",
-    "easyocr>=1.7.2",
-    "surya-ocr>=0.6",
-    "pdf2image>=1.17",
-    "opencv-python-headless>=4.11.0.86",
-    "docling>=2.79.0",
+    # Distributed OCR pipeline
+    "celery[redis]>=5.3",
+    "psutil>=5.9",
+    "redis>=5.0",
+    # Dashboard
+    "streamlit>=1.30",
+    "streamlit-pdf-viewer>=0.0.27",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sambandh-postgres
+    environment:
+      POSTGRES_USER: sambandh
+      POSTGRES_PASSWORD: sambandh
+      POSTGRES_DB: sambandh
+    command: postgres -c max_connections=200
+    volumes:
+      - sambandh_pg_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sambandh"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: sambandh-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6380:6379"
+    volumes:
+      - sambandh_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  dashboard:
+    image: sambandh-preprocessing-worker:latest
+    container_name: sambandh-dashboard
+    command: >
+      streamlit run scripts/ocr_dashboard.py
+      --server.port 8501
+      --server.address 0.0.0.0
+      --server.headless true
+    environment:
+      - DATABASE_URL=postgresql://sambandh:sambandh@postgres:5432/sambandh
+      - REDIS_URL=redis://redis:6379/0
+      - GCS_INPUT_BUCKET=${GCS_INPUT_BUCKET:-sulekha-pdfs}
+      - GCS_OUTPUT_BUCKET=${GCS_OUTPUT_BUCKET:-parsed-sulekha}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/gcs-credentials.json
+    volumes:
+      - ${SECRETS_DIR:-./.secrets}:/app/secrets:ro
+      - ./scripts:/app/scripts:ro
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: sambandh-preprocessing-worker:latest
+    command: >
+      celery -A sambandh.celery_app worker
+      --concurrency=${WORKER_CONCURRENCY:-8}
+      --pool=prefork
+      -Q ocr
+      -n worker-%h
+    environment:
+      - DATABASE_URL=postgresql://sambandh:sambandh@postgres:5432/sambandh
+      - REDIS_URL=redis://redis:6379/0
+      - GCS_INPUT_BUCKET=${GCS_INPUT_BUCKET:-sulekha-pdfs}
+      - GCS_OUTPUT_BUCKET=${GCS_OUTPUT_BUCKET:-parsed-sulekha}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/gcs-credentials.json
+    volumes:
+      - ${SECRETS_DIR:-./.secrets}:/app/secrets:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 16G
+
+volumes:
+  sambandh_pg_data:
+  sambandh_redis_data:
