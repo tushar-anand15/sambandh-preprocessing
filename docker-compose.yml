@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: sambandh-preprocessing-worker:latest
+    image: ${WORKER_IMAGE:-sambandh-preprocessing-worker:latest}
     container_name: sambandh-dashboard
     command: >
       streamlit run scripts/ocr_dashboard.py
@@ -60,12 +60,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  metrics-recorder:
+    image: ${WORKER_IMAGE:-sambandh-preprocessing-worker:latest}
+    container_name: sambandh-metrics
+    command: python -m sambandh.metrics_recorder
+    environment:
+      - DATABASE_URL=postgresql://sambandh:sambandh@postgres:5432/sambandh
+      - SNAPSHOT_INTERVAL=${SNAPSHOT_INTERVAL:-300}
+      - STUCK_JOB_TIMEOUT_MINUTES=${STUCK_JOB_TIMEOUT_MINUTES:-20}
+      - STALE_HEARTBEAT_TIMEOUT_MINUTES=${STALE_HEARTBEAT_TIMEOUT_MINUTES:-10}
+      - PYTHONPATH=/app/src
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   worker:
     build: .
-    image: sambandh-preprocessing-worker:latest
+    image: ${WORKER_IMAGE:-sambandh-preprocessing-worker:latest}
     command: >
       celery -A sambandh.celery_app worker
-      --concurrency=${WORKER_CONCURRENCY:-8}
+      --concurrency=${WORKER_CONCURRENCY:-2}
       --pool=prefork
       -Q ocr
       -n worker-%h
@@ -75,8 +92,11 @@ services:
       - GCS_INPUT_BUCKET=${GCS_INPUT_BUCKET:-sulekha-pdfs}
       - GCS_OUTPUT_BUCKET=${GCS_OUTPUT_BUCKET:-parsed-sulekha}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/gcs-credentials.json
+      - MACHINE_NAME=${MACHINE_NAME:-sukekha-scraper-v1}
+      - PYTHONPATH=/app/src
     volumes:
       - ${SECRETS_DIR:-./.secrets}:/app/secrets:ro
+      - ./src:/app/src:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,10 +104,10 @@ services:
         condition: service_healthy
     restart: unless-stopped
     deploy:
-      replicas: 1
+      replicas: ${WORKER_REPLICAS:-8}
       resources:
         limits:
-          memory: 16G
+          memory: 8G
 
 volumes:
   sambandh_pg_data:

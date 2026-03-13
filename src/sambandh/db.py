@@ -110,15 +110,17 @@ def upsert_heartbeat(
     pdfs_completed: int,
     pdfs_failed: int,
     current_pdf: str | None,
+    machine_name: str | None = None,
 ):
     now = datetime.now(timezone.utc)
     with get_conn() as conn:
         conn.execute(
             """INSERT INTO worker_heartbeats
-                   (worker_id, hostname, cpu_count, cpu_percent, mem_percent,
+                   (worker_id, hostname, machine_name, cpu_count, cpu_percent, mem_percent,
                     load_avg, pdfs_completed, pdfs_failed, current_pdf, started_at, last_seen)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (worker_id) DO UPDATE SET
+                   machine_name = EXCLUDED.machine_name,
                    cpu_percent = EXCLUDED.cpu_percent,
                    mem_percent = EXCLUDED.mem_percent,
                    load_avg = EXCLUDED.load_avg,
@@ -129,6 +131,7 @@ def upsert_heartbeat(
             [
                 worker_id,
                 hostname,
+                machine_name,
                 cpu_count,
                 cpu_percent,
                 mem_percent,
@@ -140,3 +143,108 @@ def upsert_heartbeat(
                 now,
             ],
         )
+
+
+def reset_stuck_jobs(timeout_minutes: int = 20) -> list[dict]:
+    """Reset jobs stuck in 'started' state back to 'pending'."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """UPDATE parse_jobs 
+               SET status = 'pending', worker_id = NULL, started_at = NULL 
+               WHERE status = 'started' 
+                 AND started_at < now() - interval '%s minutes'
+               RETURNING id, gcs_path, worker_id""",
+            [timeout_minutes],
+        ).fetchall()
+    return rows
+
+
+def delete_stale_heartbeats(timeout_minutes: int = 10) -> list[dict]:
+    """Remove worker heartbeats that haven't been updated recently."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """DELETE FROM worker_heartbeats 
+               WHERE last_seen < now() - interval '%s minutes'
+               RETURNING worker_id, last_seen""",
+            [timeout_minutes],
+        ).fetchall()
+    return rows
+
+
+def get_active_heartbeats() -> list[dict]:
+    """Get all worker heartbeats for snapshotting."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT worker_id, hostname, machine_name, cpu_percent, mem_percent, 
+                      load_avg, pdfs_completed, pdfs_failed
+               FROM worker_heartbeats 
+               WHERE last_seen > now() - interval '5 minutes'"""
+        ).fetchall()
+    return rows
+
+
+def insert_metrics_snapshot(
+    worker_id: str,
+    hostname: str | None,
+    machine_name: str,
+    cpu_percent: float,
+    mem_percent: float,
+    load_avg: float,
+    pdfs_completed_total: int,
+    pdfs_in_interval: int,
+):
+    """Insert a point-in-time metrics snapshot."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO worker_metrics_history
+                   (worker_id, hostname, machine_name, cpu_percent, mem_percent,
+                    load_avg, pdfs_completed_total, pdfs_in_interval)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            [
+                worker_id,
+                hostname,
+                machine_name,
+                cpu_percent,
+                mem_percent,
+                load_avg,
+                pdfs_completed_total,
+                pdfs_in_interval,
+            ],
+        )
+
+
+def insert_throughput_snapshot(
+    interval_start: datetime,
+    interval_end: datetime,
+    machine_name: str | None,
+    pdfs_completed: int,
+    avg_parse_time: float | None,
+):
+    """Insert a throughput snapshot for a time interval."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO throughput_snapshots
+                   (interval_start, interval_end, machine_name, pdfs_completed, avg_parse_time)
+               VALUES (%s, %s, %s, %s, %s)""",
+            [interval_start, interval_end, machine_name, pdfs_completed, avg_parse_time],
+        )
+
+
+def get_throughput_by_machine(since_minutes: int = 5) -> list[dict]:
+    """Get completed PDFs grouped by machine for the last N minutes."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT 
+                   COALESCE(
+                       (SELECT machine_name FROM worker_heartbeats WHERE worker_heartbeats.worker_id = parse_jobs.worker_id),
+                       SPLIT_PART(worker_id, '-', 2)
+                   ) AS machine_name,
+                   COUNT(*) AS pdfs_completed,
+                   AVG(parse_time_seconds) AS avg_parse_time
+               FROM parse_jobs 
+               WHERE status = 'done' 
+                 AND completed_at > now() - interval '%s minutes'
+               GROUP BY 1""",
+            [since_minutes],
+        ).fetchall()
+    return rows

@@ -13,8 +13,10 @@ from sambandh.celery_app import app
 from sambandh import db, gcs
 from sambandh.converter import get_converter
 
-WORKER_ID = f"worker-{socket.gethostname()}-{os.getpid()}"
+MACHINE_NAME = os.environ.get("MACHINE_NAME", socket.gethostname())
 HOSTNAME = socket.gethostname()
+# Use hostname (container ID in Docker) for unique worker identification
+WORKER_ID = f"worker-{MACHINE_NAME}-{HOSTNAME}"
 
 _heartbeat_lock = threading.Lock()
 _stats = {"completed": 0, "failed": 0, "current_pdf": None}
@@ -23,20 +25,29 @@ _stats = {"completed": 0, "failed": 0, "current_pdf": None}
 def _heartbeat_loop(stop_event: threading.Event, interval: float = 30.0):
     """Background thread that updates worker_heartbeats every `interval` seconds."""
     cpu_count = os.cpu_count() or 1
+    proc = psutil.Process()
+    proc.cpu_percent()  # First call returns 0, need to prime it
+    
     while not stop_event.wait(timeout=interval):
         try:
             with _heartbeat_lock:
                 current = _stats.copy()
+            
+            # Per-process metrics (this worker's actual usage)
+            proc_cpu = proc.cpu_percent()
+            proc_mem = proc.memory_percent()
+            
             db.upsert_heartbeat(
                 worker_id=WORKER_ID,
                 hostname=HOSTNAME,
                 cpu_count=cpu_count,
-                cpu_percent=psutil.cpu_percent(interval=None),
-                mem_percent=psutil.virtual_memory().percent,
+                cpu_percent=proc_cpu,
+                mem_percent=proc_mem,
                 load_avg=os.getloadavg()[0],
                 pdfs_completed=current["completed"],
                 pdfs_failed=current["failed"],
                 current_pdf=current["current_pdf"],
+                machine_name=MACHINE_NAME,
             )
         except Exception:
             pass
