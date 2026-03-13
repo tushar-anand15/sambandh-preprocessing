@@ -1,0 +1,15 @@
+{
+  "machine_config": "8core_31gb",
+  "cpu_count": 8,
+  "ram_gb": 31.352787017822266,
+  "num_workers": 8,
+  "total_pdfs": 25,
+  "successful": 25,
+  "failed": 0,
+  "wall_time_seconds": 1009.3808405399323,
+  "total_cpu_time_seconds": 7057.140476703644,
+  "speedup": 6.991553825143618,
+  "avg_time_per_pdf": 282.28561906814576,
+  "pdfs_per_hour": 91.82189332054755,
+  "timestamp": "2026-03-13T06:24:05.931000"
+}

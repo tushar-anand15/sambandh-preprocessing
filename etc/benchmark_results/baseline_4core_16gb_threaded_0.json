@@ -1,0 +1,17 @@
+{
+  "machine_config": "4core_16gb",
+  "pipeline_type": "threaded",
+  "cpu_count": 4,
+  "ram_gb": 15.6,
+  "num_workers": 4,
+  "total_pdfs": 25,
+  "successful": 25,
+  "failed": 0,
+  "wall_time_seconds": 10128.702979564667,
+  "total_cpu_time_seconds": 40363.11639928818,
+  "speedup": 3.985023203930795,
+  "avg_time_per_pdf": 1614.5246559715272,
+  "pdfs_per_hour": 7.581178741822731,
+  "timestamp": "2026-03-12T19:33:54.203825",
+  "notes": "ThreadedPdfPipelineOptions - SLOW due to CPU contention on 4 cores"
+}
