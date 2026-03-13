@@ -22,6 +22,8 @@ dependencies = [
     "streamlit>=1.30",
     "streamlit-pdf-viewer>=0.0.27",
     "pandas>=2.0",
+    # Chunking
+    "tiktoken>=0.5",
 ]
 
 [project.optional-dependencies]

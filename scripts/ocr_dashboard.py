@@ -69,7 +69,7 @@ def query_df(sql: str, params=None) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Sambandh OCR Dashboard", layout="wide")
 
-page = st.sidebar.radio("Navigate", ["Overview", "Machines", "Document Viewer"])
+page = st.sidebar.radio("Navigate", ["Overview", "Machines", "Document Statistics", "Document Viewer"])
 
 # Show current time in IST
 now_ist = datetime.now(IST)
@@ -342,7 +342,14 @@ elif page == "Machines":
         st.subheader("PDFs Completed by Machine")
         worker_throughput = query_df(
             """SELECT 
-                   COALESCE(wh.machine_name, SPLIT_PART(pj.worker_id, '-', 2)) AS machine_name,
+                   COALESCE(
+                       wh.machine_name, 
+                       CASE 
+                           WHEN pj.worker_id LIKE 'worker-sukekha%%' THEN 'sukekha-scraper-v1'
+                           WHEN pj.worker_id IS NOT NULL THEN SPLIT_PART(pj.worker_id, '-', 2)
+                           ELSE 'unknown'
+                       END
+                   ) AS machine_name,
                    count(*) AS done
                FROM parse_jobs pj
                LEFT JOIN worker_heartbeats wh ON wh.worker_id = pj.worker_id
@@ -350,6 +357,8 @@ elif page == "Machines":
                GROUP BY 1 ORDER BY done DESC"""
         )
         if not worker_throughput.empty:
+            # Filter out null/empty machine names
+            worker_throughput = worker_throughput[worker_throughput["machine_name"].notna() & (worker_throughput["machine_name"] != "")]
             st.bar_chart(worker_throughput.set_index("machine_name")["done"])
 
     # Queue depth from Redis
@@ -364,7 +373,162 @@ elif page == "Machines":
         st.caption("Could not read Redis queue depth")
 
 # ---------------------------------------------------------------------------
-# PAGE 3: Document Viewer
+# PAGE 3: Document Statistics
+# ---------------------------------------------------------------------------
+elif page == "Document Statistics":
+    st.title("Document Statistics")
+
+    # --- Section 1: Pipeline Progress ---
+    ocr_done = query("SELECT COUNT(*) AS cnt FROM parse_jobs WHERE status = 'done'")[0]["cnt"]
+    chunk_stats = query("""
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'done')    AS done,
+            COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+            COUNT(*) FILTER (WHERE status = 'failed')  AS failed,
+            COALESCE(SUM(chunk_count)    FILTER (WHERE status = 'done'), 0) AS total_chunks,
+            COALESCE(SUM(kv_chunks)      FILTER (WHERE status = 'done'), 0) AS kv_chunks,
+            COALESCE(SUM(narrative_chunks) FILTER (WHERE status = 'done'), 0) AS narrative_chunks,
+            COALESCE(SUM(table_chunks)   FILTER (WHERE status = 'done'), 0) AS table_chunks,
+            COALESCE(SUM(total_tokens)   FILTER (WHERE status = 'done'), 0) AS total_tokens,
+            COALESCE(AVG(chunk_time_seconds) FILTER (WHERE status = 'done'), 0) AS avg_chunk_time,
+            COALESCE(AVG(chunk_count)    FILTER (WHERE status = 'done'), 0) AS avg_chunks_per_doc,
+            COALESCE(AVG(total_tokens)   FILTER (WHERE status = 'done'), 0) AS avg_tokens_per_doc
+        FROM chunk_jobs
+    """)[0]
+
+    chunk_done = chunk_stats["done"]
+    chunk_pct = chunk_done / max(ocr_done, 1)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("OCR Done", f"{ocr_done:,}")
+    c2.metric("Chunked", f"{chunk_done:,}", delta=f"{chunk_done - ocr_done:+,}" if chunk_done != ocr_done else None)
+    c3.metric("Total Chunks", f"{chunk_stats['total_chunks']:,}")
+    c4.metric("Total Tokens", f"{chunk_stats['total_tokens'] / 1_000_000:.1f}M")
+    c5.metric("Avg Chunk Time", f"{chunk_stats['avg_chunk_time'] * 1000:.0f}ms")
+
+    st.progress(chunk_pct, text=f"{chunk_done:,} / {ocr_done:,} documents chunked ({chunk_pct:.1%})")
+
+    if chunk_stats["pending"] > 0 or chunk_stats["failed"] > 0:
+        st.caption(f"Pending: {chunk_stats['pending']:,}  |  Failed: {chunk_stats['failed']:,}")
+
+    st.divider()
+
+    # --- Section 2: Chunk Type Breakdown ---
+    st.subheader("Chunk Type Breakdown")
+
+    total_chunks = chunk_stats["total_chunks"] or 1
+    kv = chunk_stats["kv_chunks"]
+    narrative = chunk_stats["narrative_chunks"]
+    table = chunk_stats["table_chunks"]
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("KV Chunks", f"{kv:,}", delta=f"{100 * kv / total_chunks:.1f}%", delta_color="off")
+        m2.metric("Narrative Chunks", f"{narrative:,}", delta=f"{100 * narrative / total_chunks:.1f}%", delta_color="off")
+        m3.metric("Table Chunks", f"{table:,}", delta=f"{100 * table / total_chunks:.1f}%", delta_color="off")
+
+        st.divider()
+
+        m4, m5 = st.columns(2)
+        m4.metric("Avg Chunks / Doc", f"{chunk_stats['avg_chunks_per_doc']:.1f}")
+        m5.metric("Avg Tokens / Doc", f"{chunk_stats['avg_tokens_per_doc']:,.0f}")
+
+    with col_right:
+        type_df = pd.DataFrame({
+            "Chunk Type": ["KV", "Narrative", "Table"],
+            "Count": [kv, narrative, table],
+        }).set_index("Chunk Type")
+        st.bar_chart(type_df)
+
+    st.divider()
+
+    # --- Section 3: Token Distribution per Document ---
+    st.subheader("Token Distribution per Document")
+
+    token_dist_df = query_df("""
+        SELECT
+            width_bucket(total_tokens, 0, 120000, 12) AS bucket,
+            COUNT(*) AS docs
+        FROM chunk_jobs
+        WHERE status = 'done' AND total_tokens > 0
+        GROUP BY 1
+        ORDER BY 1
+    """)
+
+    if not token_dist_df.empty:
+        bucket_size = 10000
+        token_dist_df["token_range"] = token_dist_df["bucket"].apply(
+            lambda b: f"{int((b - 1) * bucket_size / 1000)}k–{int(b * bucket_size / 1000)}k"
+        )
+        st.bar_chart(token_dist_df.set_index("token_range")["docs"])
+    else:
+        st.info("No token distribution data yet.")
+
+    st.divider()
+
+    # --- Section 4: Breakdown by District / LB Type ---
+    st.subheader("Breakdown by District & LB Type")
+
+    breakdown_df = query_df("""
+        SELECT pj.district_name, pj.lb_type,
+               SUM(cj.chunk_count)  AS chunks,
+               SUM(cj.total_tokens) AS tokens,
+               COUNT(*)             AS docs
+        FROM chunk_jobs cj
+        JOIN parse_jobs pj ON cj.parse_job_id = pj.id
+        WHERE cj.status = 'done'
+          AND pj.district_name IS NOT NULL
+        GROUP BY 1, 2
+        ORDER BY chunks DESC
+    """)
+
+    if not breakdown_df.empty:
+        col_d, col_lb = st.columns(2)
+
+        with col_d:
+            st.caption("Top Districts by Chunk Count")
+            district_df = (
+                breakdown_df.groupby("district_name")["chunks"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(15)
+            )
+            st.bar_chart(district_df)
+
+        with col_lb:
+            st.caption("Chunks by LB Type")
+            lb_df = (
+                breakdown_df.groupby("lb_type")["chunks"]
+                .sum()
+                .sort_values(ascending=False)
+            )
+            st.bar_chart(lb_df)
+
+        st.divider()
+
+        st.caption("Full breakdown table")
+        st.dataframe(
+            breakdown_df.rename(columns={
+                "district_name": "District",
+                "lb_type": "LB Type",
+                "chunks": "Chunks",
+                "tokens": "Tokens",
+                "docs": "Docs",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Chunks": st.column_config.NumberColumn(format="%d"),
+                "Tokens": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+    else:
+        st.info("No breakdown data yet.")
+
+# ---------------------------------------------------------------------------
+# PAGE 4: Document Viewer
 # ---------------------------------------------------------------------------
 elif page == "Document Viewer":
     st.title("Document Viewer")
@@ -532,21 +696,106 @@ elif page == "Document Viewer":
                 if row.get("output_gcs_path"):
                     try:
                         from sambandh.gcs import download_json_from_gcs
+                        import json
 
                         data = download_json_from_gcs(row["output_gcs_path"])
-                        tab_md, tab_json = st.tabs(["Markdown", "Raw JSON"])
+                        
+                        # Try to load chunks
+                        chunks_data = None
+                        chunks_path = f"chunks/{row['output_gcs_path']}"
+                        try:
+                            chunks_data = download_json_from_gcs(chunks_path)
+                        except Exception:
+                            pass
+                        
+                        if chunks_data:
+                            tab_md, tab_json, tab_chunks = st.tabs(["Markdown", "Raw JSON", "Chunks"])
+                        else:
+                            tab_md, tab_json = st.tabs(["Markdown", "Raw JSON"])
+                            tab_chunks = None
+                        
                         with tab_md:
-                            # Scrollable markdown container
                             markdown_content = data.get("markdown", "_No markdown_")
                             st.markdown(
                                 f"""<div style="height: 600px; overflow-y: auto; border: 1px solid #333; 
-                                    padding: 15px; border-radius: 5px; background-color: #0e1117;">
-                                    {markdown_content}
+                                    padding: 15px; border-radius: 5px; background-color: #0e1117;
+                                    font-size: 14px; line-height: 1.4;">
+                                    <style>
+                                        .small-md h1 {{ font-size: 1.4em; }}
+                                        .small-md h2 {{ font-size: 1.2em; }}
+                                        .small-md h3 {{ font-size: 1.1em; }}
+                                        .small-md p, .small-md li {{ font-size: 14px; }}
+                                    </style>
+                                    <div class="small-md">{markdown_content}</div>
                                 </div>""",
                                 unsafe_allow_html=True
                             )
+                        
                         with tab_json:
-                            st.json(data, expanded=False)
+                            json_str = json.dumps(data, ensure_ascii=False, indent=2)
+                            st.markdown(
+                                f"""<div style="height: 600px; overflow-y: auto; border: 1px solid #333; 
+                                    padding: 15px; border-radius: 5px; background-color: #0e1117;">
+                                    <pre style="margin: 0; font-size: 12px; white-space: pre-wrap; word-wrap: break-word;">{json_str}</pre>
+                                </div>""",
+                                unsafe_allow_html=True
+                            )
+                        
+                        if tab_chunks and chunks_data:
+                            with tab_chunks:
+                                import html
+                                
+                                chunk_count = chunks_data.get("chunk_count", 0)
+                                stats = chunks_data.get("stats", {})
+                                st.caption(
+                                    f"Total: {chunk_count} chunks | "
+                                    f"KV: {stats.get('kv_chunks', 0)} | "
+                                    f"Narrative: {stats.get('narrative_chunks', 0)} | "
+                                    f"Table: {stats.get('table_schema_chunks', 0) + stats.get('table_rows_chunks', 0) + stats.get('table_summary_chunks', 0)} | "
+                                    f"Tokens: {stats.get('total_tokens', 0):,}"
+                                )
+                                
+                                type_colors = {
+                                    "kv": "#4CAF50",
+                                    "narrative": "#2196F3",
+                                    "table_schema": "#FF9800",
+                                    "table_rows": "#FF5722",
+                                    "table_summary": "#9C27B0",
+                                }
+                                
+                                # Build chunks display
+                                chunks_html_parts = []
+                                for i, chunk in enumerate(chunks_data.get("chunks", [])):
+                                    chunk_type = chunk.get("chunk_type", "unknown")
+                                    section_parts = chunk.get("section_path", [])
+                                    section = html.escape(" > ".join(section_parts)) if section_parts else ""
+                                    pages = f"p{chunk.get('page_start', '?')}"
+                                    if chunk.get("page_end") and chunk.get("page_end") != chunk.get("page_start"):
+                                        pages += f"-{chunk.get('page_end')}"
+                                    tokens = chunk.get("metadata", {}).get("token_count", "?")
+                                    display_text = html.escape(chunk.get("display_text", ""))
+                                    color = type_colors.get(chunk_type, "#666")
+                                    
+                                    section_html = f' | <span style="color: #aaa;">{section}</span>' if section else ''
+                                    
+                                    chunk_html = (
+                                        f'<div style="margin-bottom: 12px; padding: 10px; border-left: 3px solid {color}; background: #1a1a1a;">'
+                                        f'<div style="font-size: 11px; color: #888; margin-bottom: 5px;">'
+                                        f'<span style="color: {color}; font-weight: bold;">#{i+1} {chunk_type}</span>'
+                                        f' | {pages} | {tokens} tokens{section_html}'
+                                        f'</div>'
+                                        f'<div style="font-size: 13px; white-space: pre-wrap; color: #ddd;">{display_text}</div>'
+                                        f'</div>'
+                                    )
+                                    chunks_html_parts.append(chunk_html)
+                                
+                                full_html = (
+                                    '<div style="height: 550px; overflow-y: auto; border: 1px solid #333; '
+                                    'padding: 10px; border-radius: 5px; background-color: #0e1117;">'
+                                    + ''.join(chunks_html_parts) +
+                                    '</div>'
+                                )
+                                st.markdown(full_html, unsafe_allow_html=True)
                     except Exception as e:
                         st.error(f"Could not load output JSON: {e}")
                 else:
@@ -557,6 +806,6 @@ elif page == "Document Viewer":
 # ---------------------------------------------------------------------------
 # Auto-refresh (only for Overview and Machines pages)
 # ---------------------------------------------------------------------------
-if page != "Document Viewer":
+if page not in ("Document Viewer", "Document Statistics"):
     time.sleep(10)
     st.rerun()

@@ -9,7 +9,6 @@ services:
     command: postgres -c max_connections=200
     volumes:
       - sambandh_pg_data:/var/lib/postgresql/data
-      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
     ports:
       - "5433:5432"
     healthcheck:
@@ -33,6 +32,20 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+  migrate:
+    image: ${WORKER_IMAGE:-sambandh-preprocessing-worker:latest}
+    container_name: sambandh-migrate
+    command: python scripts/run_migrations.py --bootstrap
+    environment:
+      - DATABASE_URL=postgresql://sambandh:sambandh@postgres:5432/sambandh
+      - PYTHONPATH=/app/src
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./src:/app/src:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   dashboard:
     image: ${WORKER_IMAGE:-sambandh-preprocessing-worker:latest}
@@ -58,6 +71,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   metrics-recorder:
@@ -75,6 +90,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   worker:
@@ -102,6 +119,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     deploy:
       replicas: ${WORKER_REPLICAS:-8}
