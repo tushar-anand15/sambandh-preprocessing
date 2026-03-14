@@ -49,6 +49,7 @@ def get_conn_pool():
         DATABASE_URL.replace("postgresql+psycopg://", "postgresql://"),
         min_size=1,
         max_size=2,
+        check=ConnectionPool.check_connection,
         kwargs={"row_factory": dict_row},
     )
 
@@ -258,7 +259,7 @@ elif page == "Machines":
                 "avg_cpu": st.column_config.NumberColumn("Avg CPU%", format="%.1f"),
                 "avg_mem": st.column_config.NumberColumn("Avg Mem%", format="%.1f"),
             },
-            use_container_width=True,
+            width="stretch",
         )
 
         st.divider()
@@ -281,7 +282,7 @@ elif page == "Machines":
                 "last_seen_ist": "Last Seen (IST)",
             },
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
         st.divider()
@@ -517,7 +518,7 @@ elif page == "Document Statistics":
                 "tokens": "Tokens",
                 "docs": "Docs",
             }),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Chunks": st.column_config.NumberColumn(format="%d"),
@@ -650,7 +651,7 @@ elif page == "Document Viewer":
         # Use data_editor for selection
         selected_rows = st.dataframe(
             display_docs,
-            use_container_width=True,
+            width="stretch",
             hide_index=False,
             column_config={
                 "Parse Time (s)": st.column_config.NumberColumn(format="%.1f"),

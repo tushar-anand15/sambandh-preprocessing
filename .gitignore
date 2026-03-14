@@ -17,3 +17,5 @@ dist/
 etc/sample_*/
 etc/*output/
 .secrets/
+docs/
+rag_export/

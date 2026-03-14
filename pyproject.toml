@@ -24,6 +24,10 @@ dependencies = [
     "pandas>=2.0",
     # Chunking
     "tiktoken>=0.5",
+    # Embedding pipeline
+    "pgvector>=0.3",
+    "FlagEmbedding>=1.2",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]

@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: sambandh-postgres
     environment:
       POSTGRES_USER: sambandh
@@ -126,7 +126,7 @@ services:
       replicas: ${WORKER_REPLICAS:-8}
       resources:
         limits:
-          memory: 8G
+          memory: 12G
 
 volumes:
   sambandh_pg_data:
